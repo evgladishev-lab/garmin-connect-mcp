@@ -8,12 +8,21 @@
     },
     "api/garmin-sync.js": {
       "maxDuration": 120
+    },
+    "api/garmin-scheduled.js": {
+      "maxDuration": 120,
+      "experimentalTriggers": [
+        {
+          "type": "schedule/v1beta"
+        }
+      ]
     }
   },
-  "crons": [
-    {
-      "path": "/api/garmin-sync",
-      "schedule": "0 2 * * *"
+  "schedules": {
+    "garmin-daily": {
+      "schedule": "0 9 * * *",
+      "timezone": "Asia/Novosibirsk",
+      "function": "api/garmin-scheduled"
     }
-  ]
+  }
 }

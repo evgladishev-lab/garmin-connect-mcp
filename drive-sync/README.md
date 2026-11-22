@@ -23,10 +23,11 @@ OAuth-клиент с типом аудитории **External** и статус
 системного `VERCEL_PROJECT_ID` со значением `GARMIN_SYNC_PROJECT_ID` отдельного
 проекта `fox-cce3/garmin-health-sync-preview`. В тестовом Preview вызовите
 `POST /api/garmin-sync` с заголовком `Authorization: Bearer …` и включённой
-защитой Preview. В Vercel Cron используется `GET` с тем же серверным
-`CRON_SECRET`. Расписание `0 2 * * *` соответствует окну 09:00–09:59
-Asia/Novosibirsk на Hobby. Vercel запускает Cron на Production-развёртывании
-**этого отдельного проекта**. Развёртывание Preview само расписание не активирует.
+защитой Preview. Автоматический запуск объявлен через Vercel Schedules для приватной функции.
+Расписание `0 9 * * *` использует Asia/Novosibirsk. У Hobby есть окно
+запуска и лимит 5 000 запусков в месяц. Preview-расписание изначально
+неактивно. После проверки настройте его через Schedules в том же проекте
+и выберите scope CLI-деплоя. Функция обрабатывает данные только в Preview.
 Нужны системные переменные Vercel и Fluid Compute для `maxDuration: 120`.
 
 Переменные для нужной среды отдельного проекта:
@@ -38,7 +39,7 @@ Asia/Novosibirsk на Hobby. Vercel запускает Cron на Production-ра
 | `GOOGLE_DRIVE_CLIENT_ID` | ID OAuth-клиента Google Cloud |
 | `GOOGLE_DRIVE_CLIENT_SECRET` | Секрет OAuth-клиента |
 | `GOOGLE_DRIVE_REFRESH_TOKEN` | Refresh token OAuth с правом `drive.file` |
-| `CRON_SECRET` | Случайный секрет длиной не менее 32 символов |
+| `CRON_SECRET` | Секрет ручного POST длиной не менее 32 символов, штатному расписанию не нужен |
 | `BLOB_READ_WRITE_TOKEN` | Ключ отдельного private Vercel Blob для блокировки и таблицы идентификаторов |
 
 Храните секреты в типе Secret. Private Blob хранит только даты, служебную

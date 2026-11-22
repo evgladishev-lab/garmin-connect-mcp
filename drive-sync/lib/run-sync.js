@@ -1,4 +1,6 @@
-import { collectDay, completedDates, METRICS, ZONE } from './garmin-sync.js';
+import { openDrive } from './sync-drive.js';
+import { blobState } from './sync-state.js';
+import { garminClient, collectDay, completedDates, METRICS, ZONE } from './garmin-sync.js';
 import { GoogleRequestError } from './google-drive.js';
 
 const schemaVersion = 1;
@@ -65,4 +67,38 @@ export async function syncDays({ get, drive, state, now = new Date() }) {
     }
   }
   return { ok: days.every(day => day.verified && day.errors.length === 0), days };
+}
+
+const keys = ['GARMIN_API_KEY', 'GOOGLE_DRIVE_CLIENT_ID', 'GOOGLE_DRIVE_CLIENT_SECRET',
+  'GOOGLE_DRIVE_REFRESH_TOKEN', 'BLOB_READ_WRITE_TOKEN'];
+
+export function isSyncPreview(env) {
+  return env.VERCEL_ENV === 'preview' && Boolean(env.GARMIN_SYNC_PROJECT_ID) &&
+    env.VERCEL_PROJECT_ID === env.GARMIN_SYNC_PROJECT_ID;
+}
+
+export async function executeSync(env, request = fetch) {
+  if (!isSyncPreview(env)) return { ok: false, error: 'not_found' };
+  const missing = keys.filter(key => !env[key]);
+  if (missing.length) return { ok: false, error: 'configuration', missing };
+  const state = blobState(env.BLOB_READ_WRITE_TOKEN, env.GARMIN_SYNC_PROJECT_ID);
+  let unlock;
+  try {
+    unlock = await state.lock();
+    if (!unlock) return { ok: false, error: 'already_running' };
+    const deadline = AbortSignal.timeout(90_000);
+    const bounded = (url, options) => request(url, {
+      ...options, signal: AbortSignal.any([deadline, options.signal]),
+    });
+    const drive = await openDrive(env, bounded);
+    return await syncDays({ get: garminClient(env.GARMIN_API_KEY, bounded), drive, state });
+  } catch (error) {
+    return { ok: false, ...failure(error, 'sync_environment_failed') };
+  } finally {
+    if (unlock) {
+      try { await unlock(); } catch {
+        // The lease expires automatically before another run can take over.
+      }
+    }
+  }
 }
