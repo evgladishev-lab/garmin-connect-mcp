@@ -42,8 +42,12 @@ export async function exchangeToken(request, params) {
   const response = await googleRequest(request, 'oauth_token', GOOGLE_TOKEN_URL, {
     method: 'POST',
     body: new URLSearchParams(params),
-  });
+  }, [400, 401]);
   const tokens = await googleJson(response, 'oauth_token');
+  if (!response.ok) {
+    const renewal = params.grant_type === 'refresh_token' && tokens?.error === 'invalid_grant';
+    throw new GoogleRequestError(renewal ? 'oauth_reauthorization_required' : 'oauth_token', response.status);
+  }
   if (typeof tokens?.access_token !== 'string' || !tokens.access_token ||
       typeof tokens.token_type !== 'string' || tokens.token_type.toLowerCase() !== 'bearer' ||
       typeof tokens.scope !== 'string' || tokens.scope.trim() !== DRIVE_SCOPE) {
