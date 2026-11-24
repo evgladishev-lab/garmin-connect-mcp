@@ -19,6 +19,16 @@ export function completedDates(now) {
   return [-3, -2, -1].map(offset => shiftDate(today, offset));
 }
 
+export function historicalDates(range, now = new Date()) {
+  const { startDate, endDate } = range ?? {};
+  const canonical = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(Date.parse(value)) && shiftDate(value, 0) === value;
+  if (!canonical(startDate) || !canonical(endDate) || endDate < startDate || endDate >= localDate(now)) return null;
+  const count = (Date.parse(endDate) - Date.parse(startDate)) / DAY + 1;
+  if (count > 5) return null;
+  return Array.from({ length: count }, (_, index) => shiftDate(startDate, index));
+}
+
 const fields = (object, keys) => Object.fromEntries(keys.filter(key => object?.[key] != null).map(key => [key, object[key]]));
 const present = value => Number.isFinite(value) && value > 0;
 const rowsPresent = rows => Array.isArray(rows) && rows.some(row => Array.isArray(row) && present(row[1]));
@@ -46,14 +56,18 @@ export function garminClient(apiKey, request) {
     if (typeof raw !== 'string' || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(raw)) mismatch();
     return raw;
   }
+  const refreshToken = () => (token = setToken().catch(error => {
+    token = undefined;
+    throw error;
+  }));
   return async function get(path, params = {}) {
     const url = GARMIN + path + '?' + new URLSearchParams(params);
-    const current = await (token ??= setToken());
+    const current = await (token ?? refreshToken());
     const call = value => googleRequest(request, 'garmin_request', url, { headers: { Authorization: 'Bearer ' + value } }, [401]);
     let response = await call(current);
     if (response.status === 401) {
       await response.body?.cancel();
-      if (await token === current) token = setToken();
+      if (await token === current) refreshToken();
       response = await call(await token);
       if (response.status === 401) {
         await response.body?.cancel();
@@ -68,7 +82,7 @@ export function garminClient(apiKey, request) {
 
 export const METRICS = ['hrv', 'spo2', 'sleep', 'heartRate', 'steps', 'activity', 'workouts'];
 
-export async function collectDay(get, date) {
+export async function collectDay(get, date, historical = false) {
   const tasks = {
     hrv: async () => {
       const h = await get('/hrv-service/hrv/' + date);
@@ -80,10 +94,17 @@ export async function collectDay(get, date) {
     spo2: async () => metric(await get('/wellness-service/wellness/daily/spo2acclimation/' + date), date,
       ['avgSleepSpO2', 'averageSpO2', 'lowestSpO2', 'spO2HourlyAverages', 'spO2HourlyAveragesDescriptorList'],
       v => [v.avgSleepSpO2, v.averageSpO2, v.lowestSpO2].some(present)),
-    sleep: async () => metric(await get('/sleep-service/sleep/dailySleep', { date }), date,
-      ['sleepTimeSeconds', 'napTimeSeconds', 'deepSleepSeconds', 'lightSleepSeconds', 'remSleepSeconds',
-        'awakeSleepSeconds', 'sleepStartTimestampGMT', 'sleepEndTimestampGMT', 'sleepScores', 'avgHeartRate',
-        'averageSpO2Value', 'lowestSpO2Value', 'sleepWindowConfirmed'], v => present(v.sleepTimeSeconds)),
+    sleep: async () => {
+      const value = await get('/sleep-service/sleep/dailySleep', { date });
+      if (historical && present(value?.sleepTimeSeconds) &&
+          (!present(value.sleepEndTimestampGMT) || localDate(new Date(value.sleepEndTimestampGMT)) !== date)) mismatch();
+      return metric(value, date,
+        ['sleepTimeSeconds', 'napTimeSeconds', 'deepSleepSeconds', 'lightSleepSeconds', 'remSleepSeconds',
+          'awakeSleepSeconds', 'sleepStartTimestampGMT', 'sleepEndTimestampGMT', 'sleepScores', 'avgHeartRate',
+          'averageSpO2Value', 'lowestSpO2Value', 'sleepWindowConfirmed',
+          'averageRespirationValue', 'lowestRespirationValue', 'highestRespirationValue'],
+        v => present(v.sleepTimeSeconds));
+    },
     heartRate: async () => metric(await get('/wellness-service/wellness/dailyHeartRate', { date }), date,
       ['restingHeartRate', 'minHeartRate', 'maxHeartRate', 'heartRateValues', 'heartRateValueDescriptors'],
       v => [v.restingHeartRate, v.minHeartRate, v.maxHeartRate].some(present) || rowsPresent(v.heartRateValues)),
@@ -102,7 +123,13 @@ export async function collectDay(get, date) {
       v => v.includesWellnessData === true || v.includesActivityData === true || present(v.activeSeconds)),
     workouts: async () => training(get, date),
   };
-  const result = await Promise.allSettled(METRICS.map(key => tasks[key]()));
+  let result;
+  if (historical) {
+    result = [];
+    for (const key of METRICS) result.push((await Promise.allSettled([tasks[key]()]))[0]);
+  } else {
+    result = await Promise.allSettled(METRICS.map(key => tasks[key]()));
+  }
   return Object.fromEntries(result.map((item, i) => [METRICS[i], item.status === 'rejected'
     ? { status: 'error', code: Number.isInteger(item.reason?.status) ? item.reason.status : null,
         stage: ['garmin_auth', 'garmin_request'].includes(item.reason?.stage) ? item.reason.stage : 'garmin_shape' }

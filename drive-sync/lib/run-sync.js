@@ -31,9 +31,10 @@ function canonical(value) {
 
 const stringify = value => JSON.stringify(canonical(value));
 
-export async function syncDays({ get, drive, state, now = new Date() }) {
+export async function syncDays({ get, drive, state, now = new Date(), dates }) {
+  const historical = dates !== undefined;
   const days = [];
-  for (const date of completedDates(now)) {
+  for (const date of dates ?? completedDates(now)) {
     try {
       const existing = await drive.find(date);
       if (existing.length > 1) throw new Error('drive_duplicate');
@@ -44,14 +45,39 @@ export async function syncDays({ get, drive, state, now = new Date() }) {
       if (existing.length === 1 && existing[0].id !== id) throw new Error('drive_file_conflict');
       const previous = await drive.read(id, date);
       validatePrevious(previous, date);
-      const fetched = await collectDay(get, date);
-      const metrics = Object.fromEntries(METRICS.map(key => {
+      const fetched = await collectDay(get, date, historical);
+      const missing = METRICS.filter(key => fetched[key].status === 'no_data');
+      const errors = METRICS.filter(key => fetched[key].status === 'error').map(key => ({ metric: key, ...fetched[key] }));
+      if (historical && errors.length > 0) {
+        days.push({ date, id, changed: false, verified: false, missing, errors });
+        continue;
+      }
+      const workouts = fetched.workouts.data;
+      if (historical && previous === null && METRICS.every(key =>
+        key === 'workouts' ? !workouts?.records.length : fetched[key].status !== 'ok')) {
+        days.push({ date, changed: false, verified: false, skipped: 'no_data', missing, errors });
+        continue;
+      }
+      const metrics = { ...previous?.metrics, ...Object.fromEntries(METRICS.map(key => {
         const fresh = fetched[key];
         const old = previous?.metrics[key];
-        return [key, fresh.status !== 'ok' && old?.data != null
-          ? { status: 'stale', data: old.data, latestAttempt: fresh }
-          : fresh];
-      }));
+        if (fresh.status !== 'ok' && old?.data != null) {
+          return [key, historical ? old : { status: 'stale', data: old.data, latestAttempt: fresh }];
+        }
+        if (historical && old?.data && fresh.status === 'ok') {
+          if (key === 'workouts') {
+            const records = new Map(old.data.records.map(row => [String(row.activityId), row]));
+            for (const row of fresh.data.records) {
+              const id = String(row.activityId);
+              records.set(id, { ...records.get(id), ...row });
+            }
+            return [key, { ...fresh, data: { ...fresh.data, records: [...records.entries()]
+              .sort(([a], [b]) => a.localeCompare(b)).map(([, row]) => row) } }];
+          }
+          return [key, { ...fresh, data: { ...old.data, ...fresh.data } }];
+        }
+        return [key, fresh];
+      })) };
       const output = { schemaVersion, date, timeZone: ZONE, source: 'garmin-connect', metrics };
       const content = stringify(output);
       const changed = content !== stringify(previous);
@@ -59,14 +85,12 @@ export async function syncDays({ get, drive, state, now = new Date() }) {
       const readback = await drive.read(id, date);
       if (stringify(readback) !== content) throw new Error('drive_readback_mismatch');
       days.push({ date, id, changed, verified: true,
-        missing: METRICS.filter(key => fetched[key].status === 'no_data'),
-        errors: METRICS.filter(key => fetched[key].status === 'error').map(key => ({ metric: key, ...fetched[key] })),
-        duplicateWorkouts: fetched.workouts.data?.duplicates ?? 0 });
+        missing, errors, duplicateWorkouts: workouts?.duplicates ?? 0 });
     } catch (error) {
       days.push({ date, verified: false, ...failure(error, 'sync_day_failed') });
     }
   }
-  return { ok: days.every(day => day.verified && day.errors.length === 0), days };
+  return { ok: days.every(day => day.skipped === 'no_data' || (day.verified && day.errors.length === 0)), days };
 }
 
 const keys = ['GARMIN_API_KEY', 'GOOGLE_DRIVE_CLIENT_ID', 'GOOGLE_DRIVE_CLIENT_SECRET',
@@ -77,7 +101,23 @@ export function isSyncPreview(env) {
     env.VERCEL_PROJECT_ID === env.GARMIN_SYNC_PROJECT_ID;
 }
 
-export async function executeSync(env, request = fetch) {
+function pacedGarmin(get, signal) {
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  return async (...params) => {
+    signal.throwIfAborted();
+    await wait(175);
+    try {
+      return await get(...params);
+    } catch (error) {
+      if (error.status !== 0 && error.status !== 429 && !(error.status >= 500 && error.status <= 599)) throw error;
+      await wait(error.status === 429 ? 1500 : 600);
+      signal.throwIfAborted();
+      return get(...params);
+    }
+  };
+}
+
+export async function executeSync(env, request = fetch, dates) {
   if (!isSyncPreview(env)) return { ok: false, error: 'not_found' };
   const missing = keys.filter(key => !env[key]);
   if (missing.length) return { ok: false, error: 'configuration', missing };
@@ -91,7 +131,8 @@ export async function executeSync(env, request = fetch) {
       ...options, signal: AbortSignal.any([deadline, options.signal]),
     });
     const drive = await openDrive(env, bounded);
-    return await syncDays({ get: garminClient(env.GARMIN_API_KEY, bounded), drive, state });
+    const get = garminClient(env.GARMIN_API_KEY, bounded);
+    return await syncDays({ get: dates ? pacedGarmin(get, deadline) : get, drive, state, dates });
   } catch (error) {
     return { ok: false, ...failure(error, 'sync_environment_failed') };
   } finally {
