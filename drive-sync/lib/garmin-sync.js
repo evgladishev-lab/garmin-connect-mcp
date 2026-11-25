@@ -83,6 +83,8 @@ export function garminClient(apiKey, request) {
 export const METRICS = ['hrv', 'spo2', 'sleep', 'heartRate', 'steps', 'activity', 'workouts'];
 
 export async function collectDay(get, date, historical = false) {
+  let summaryRequest;
+  const dailySummary = () => (summaryRequest ??= get('/usersummary-service/usersummary/daily', { calendarDate: date }));
   const tasks = {
     hrv: async () => {
       const h = await get('/hrv-service/hrv/' + date);
@@ -105,9 +107,19 @@ export async function collectDay(get, date, historical = false) {
           'averageRespirationValue', 'lowestRespirationValue', 'highestRespirationValue'],
         v => present(v.sleepTimeSeconds));
     },
-    heartRate: async () => metric(await get('/wellness-service/wellness/dailyHeartRate', { date }), date,
-      ['restingHeartRate', 'minHeartRate', 'maxHeartRate', 'heartRateValues', 'heartRateValueDescriptors'],
-      v => [v.restingHeartRate, v.minHeartRate, v.maxHeartRate].some(present) || rowsPresent(v.heartRateValues)),
+    heartRate: async () => {
+      const keys = ['restingHeartRate', 'minHeartRate', 'maxHeartRate'];
+      const detail = metric(await get('/wellness-service/wellness/dailyHeartRate', { date }), date,
+        [...keys, 'heartRateValues', 'heartRateValueDescriptors'],
+        v => keys.some(key => present(v[key])) || rowsPresent(v.heartRateValues));
+      if (!historical || keys.every(key => present(detail?.[key]))) return detail;
+      const summary = await dailySummary();
+      checkDate(summary, date);
+      const fallback = Object.fromEntries(keys
+        .filter(key => !present(detail?.[key]) && present(summary?.[key]))
+        .map(key => [key, summary[key]]));
+      return Object.keys(fallback).length ? { ...detail, ...fallback } : detail;
+    },
     steps: async () => {
       const result = await get('/usersummary-service/stats/steps/daily/' + date + '/' + date);
       if (result == null) return null;
@@ -115,11 +127,15 @@ export async function collectDay(get, date, historical = false) {
       return metric(result[0], date, ['totalSteps', 'totalDistance', 'stepGoal'], v =>
         Number.isInteger(v.totalSteps) && v.totalSteps >= 0);
     },
-    activity: async () => metric(await get('/usersummary-service/usersummary/daily', { calendarDate: date }), date,
+    activity: async () => metric(await dailySummary(), date,
       ['totalKilocalories', 'activeKilocalories', 'bmrKilocalories', 'totalDistanceMeters', 'highlyActiveSeconds',
         'activeSeconds', 'sedentarySeconds', 'moderateIntensityMinutes', 'vigorousIntensityMinutes',
         'floorsAscended', 'includesWellnessData', 'includesActivityData', 'lastSyncTimestampGMT',
-        'bodyBatteryHighestValue', 'bodyBatteryLowestValue', 'bodyBatteryAtWakeTime', 'averageStressLevel'],
+        'bodyBatteryHighestValue', 'bodyBatteryLowestValue', 'bodyBatteryAtWakeTime', 'averageStressLevel',
+        ...(historical ? ['maxStressLevel', 'totalStressDuration', 'restStressDuration', 'lowStressDuration',
+          'mediumStressDuration', 'highStressDuration', 'bodyBatteryChargedValue', 'bodyBatteryDrainedValue',
+          'bodyBatteryMostRecentValue', 'avgWakingRespirationValue', 'highestRespirationValue',
+          'lowestRespirationValue', 'latestRespirationValue'] : [])],
       v => v.includesWellnessData === true || v.includesActivityData === true || present(v.activeSeconds)),
     workouts: async () => training(get, date),
   };

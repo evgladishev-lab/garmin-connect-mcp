@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { historicalDates } from '../lib/garmin-sync.js';
+import { collectDay, historicalDates } from '../lib/garmin-sync.js';
 import { syncDays } from '../lib/run-sync.js';
 
 test('validates closed historical ranges against the local calendar', () => {
@@ -58,4 +58,28 @@ test('resumes after a partial Garmin failure with the same file IDs', async () =
   assert.equal(partial.days[0].changed, false);
   assert.equal(partial.days[1].skipped, 'no_data');
   assert.deepEqual(writes, dates);
+});
+
+test('historical pulse falls back to the same-day wellness summary', async () => {
+  const date = '2024-12-21';
+  let summaryRequests = 0;
+  const get = async path => {
+    if (path.endsWith('/dailyHeartRate')) {
+      return { calendarDate: date, minHeartRate: null, maxHeartRate: null, restingHeartRate: 50 };
+    }
+    if (path.endsWith('/usersummary/daily')) {
+      summaryRequests++;
+      return { calendarDate: date, includesWellnessData: true, minHeartRate: 45, maxHeartRate: 185,
+        restingHeartRate: 49, maxStressLevel: 60, bodyBatteryChargedValue: 42, avgWakingRespirationValue: 14 };
+    }
+    return null;
+  };
+  const result = await collectDay(get, date, true);
+  assert.deepEqual(result.heartRate, {
+    status: 'ok', data: { restingHeartRate: 50, minHeartRate: 45, maxHeartRate: 185 },
+  });
+  assert.equal(result.activity.data.maxStressLevel, 60);
+  assert.equal(result.activity.data.bodyBatteryChargedValue, 42);
+  assert.equal(result.activity.data.avgWakingRespirationValue, 14);
+  assert.equal(summaryRequests, 1);
 });
